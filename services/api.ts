@@ -2,6 +2,8 @@ import axios, { AxiosError } from 'axios';
 import { parseCookies, setCookie } from 'nookies';
 
 let cookies = parseCookies();
+let isRefreshing = false;
+let failedRequestsQueue = [];
 
 export const api = axios.create({
   baseURL: 'http://localhost:3333',
@@ -19,22 +21,49 @@ api.interceptors.response.use(response => {
 
       const { 'nextauth.refreshToken': refreshToken } = cookies;
 
-      api.post('/refresh', {
-        refreshToken
-      }).then(response => {
-        const { token, refreshToken: newRefreshToken } = response.data;
+      const originalConfig = error.config;
 
-        setCookie(undefined, 'nextauth.token', token, {
-          maxAge: 60 * 60 * 24 * 30, // 30 days
-          path: '/'
+      if (!isRefreshing) {
+        isRefreshing = true;
+
+        api.post('/refresh', {
+          refreshToken
+        }).then(response => {
+          const { token, refreshToken: newRefreshToken } = response.data;
+
+          setCookie(undefined, 'nextauth.token', token, {
+            maxAge: 60 * 60 * 24 * 30, // 30 days
+            path: '/'
+          });
+
+          setCookie(undefined, 'nextauth.refreshToken', newRefreshToken, {
+            maxAge: 60 * 60 * 24 * 30,
+            path: '/'
+          });
+
+          api.defaults.headers['Authorization'] = `Bearer ${token}`;
+
+          failedRequestsQueue.forEach(request => request.onSuccess(token));
+          failedRequestsQueue = [];
+        }).catch(err => {
+          failedRequestsQueue.forEach(request => request.onFailure(err));
+          failedRequestsQueue = [];
+        }).finally(() => {
+          isRefreshing = false
         });
+      }
 
-        setCookie(undefined, 'nextauth.refreshToken', newRefreshToken, {
-          maxAge: 60 * 60 * 24 * 30,
-          path: '/'
-        });
+      return new Promise((resolve, reject) => {
+        failedRequestsQueue.push({
+          onSuccess: (token: string) => {
+            originalConfig.headers['Authorization'] = `Bearer ${token}`
 
-        api.defaults.headers['Authorization'] = `Bearer ${token}`
+            resolve(api(originalConfig))
+          },
+          onFailure: (error: AxiosError) => {
+            reject(error)
+          }
+        })
       })
     } else {
       // deslogar usuário
